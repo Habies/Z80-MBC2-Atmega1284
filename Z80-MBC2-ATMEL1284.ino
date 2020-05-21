@@ -180,14 +180,15 @@
 // ------------------------------------------------------------------------------
 
 #include <avr/pgmspace.h>                   // Needed for PROGMEM
-#include "Wire.h"                           // Needed for I2C bus
+#include <Wire.h>                           // Needed for I2C bus
 #include <EEPROM.h>                         // Needed for internal EEPROM R/W
 #include "PetitFS.h"                        // Light handler for FAT16 and FAT32 filesystems on SD
-#include "hd44780.h"                        // main hd44780 header
-#include "hd44780ioClass/hd44780_I2Cexp.h"  // i2c expander i/o class header
+#include <hd44780.h>                        // main hd44780 header
+#include <hd44780ioClass/hd44780_I2Cexp.h>  // i2c expander i/o class header
 #include "MemoryFree.h"                     // Print free memory
 #include "I2C_eeprom.h"                     // I2C Eeprom
-// #include "TEA5767.h"                        // I2C Radio Module
+#include <Adafruit_INA219.h>                // INA219 Current sensor
+#include <BasicTerm.h>                      // using BasicTerm
 
 // ------------------------------------------------------------------------------
 //
@@ -212,6 +213,8 @@ const byte    allCapsAddr = 15;           // Internal EEPROM address for the ALL
 const byte    BasicInRomAddr = 16;        // Internal EEPROM address for the Basic in Rom option
 const byte    maxDiskNum   = 99;          // Max number of virtual disks
 const byte    maxDiskSet   = 4;           // Number of configured Disk Sets
+Adafruit_INA219 ina219;
+BasicTerm term(&Serial);
 
 // Z80 programs images into flash and related constants
 const word  boot_A_StrAddr = 0xfd10;      // Payload A image starting address (flash)
@@ -764,6 +767,7 @@ byte          clockMode;                  // Z80 clock HI/LO speed selector (0 =
 byte          LastRxIsEmpty;              // "Last Rx char was empty" flag. Is set when a serial Rx operation was done
 byte          allCaps;                    // Convert incoming characters to ALL_CAPS
 byte          BasicRom;                   // Basic in ROM
+byte          InaChip        = 0;         // Set to 1 if Ina216 is found, 0 otherwise
 // when the Rx buffer was empty
 
 // DS3231 RTC variables
@@ -792,13 +796,15 @@ byte          numWriBytes;                // Number of written bytes after a wri
 byte          diskSet;                    // Current "Disk Set"
 byte          lcdPresent;                 // LCD Present
 
-hd44780_I2Cexp lcd(0x3F);                 // declare lcd object: auto locate & auto config expander chip
+//
+hd44780_I2Cexp lcd(0x3F);
 // LCD geometry
 const int LCD_COLS = 20;
 const int LCD_ROWS = 4;
 
 I2C_eeprom ee(0x57, MEMORY_SIZE);  //I2C Eeprom adress
 uint32_t start, diff, totals = 0;
+uint32_t currentFrequency;
 
 
 // ------------------------------------------------------------------------------
@@ -816,7 +822,9 @@ void setup()
   byte bootSelection = 0;          // Flag to enter into the boot mode selection
   byte errori, addressi;           // I2C
   int nDevices;                    // I2C
+
   // ------------------------------------------------------------------------------
+
   int status = lcd.begin(LCD_COLS, LCD_ROWS);
   if (status) // non zero status means it was unsuccesful
   {
@@ -847,6 +855,16 @@ void setup()
   if (!digitalRead(USER))
   {
     bootSelection = 1;
+
+    if (lcdPresent) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("IOS: ");
+      lcd.setCursor(0, 2);
+      lcd.print("Start Menu Entered");
+      lcd.setCursor(0, 3);
+      lcd.print("OK to Release Key");
+    }
   }
 
   // Initialize USER,  INT_, RAM_CE2, and BUSREQ_
@@ -938,8 +956,10 @@ void setup()
   Serial.println(F(" $$  /    $$ /  $$ |$$ |\\$$$ |        $$ |\\$  /$$ |$$ |  $$ |$$ |  $$\\ $$ |"));
   Serial.println(F("$$$$$$$$\\ \\$$$$$$  |\\$$$$$$  /        $$ | \\_/ $$ |$$$$$$$  |\\$$$$$$  |$$$$$$$$\\"));
   Serial.println(F("\\________| \\______/  \\______/         \\__|     \\__|\\_______/  \\______/ \\________|"));
-  Serial.println("Version 1.1 - Compiled on " __DATE__ " at " __TIME__ " with Arduino IDE " xstr(ARDUINO) ".");
-  Serial.println(F("\r\n\nZ80-MBC2 - A040618\r\nIOS - I/O Subsystem - S220718-R280819\r\n"));
+  Serial.println("Version 1.4 - Compiled on " __DATE__ " at " __TIME__ " with Arduino IDE " xstr(ARDUINO) ".");
+  term.set_attribute(BT_UNDERLINE);
+  term.println(F("\r\n\nZ80-MBC2 - A040618\r\nIOS - I/O Subsystem - S220718-R280819\r\n"));
+  term.set_attribute(BT_NORMAL);
   // Print if the input serial buffer is 128 bytes wide (this is needed for xmodem protocol support)
   if (SERIAL_RX_BUFFER_SIZE >= 128) Serial.println(F("IOS: Found extended serial Rx buffer."));
 
@@ -954,6 +974,37 @@ void setup()
     Serial.print(CLOCK_HIGH);
   }
   Serial.println(" MHz.");
+
+  // Initialize the INA219.
+  if (! ina219.begin())
+  {
+    term.set_color(BT_RED, BT_BLACK);
+    term.println("IOS: Failed to find INA219 chip");
+    term.set_attribute(BT_NORMAL);
+  }
+  else
+  {
+
+    ina219.setCalibration_16V_400mA();
+
+    float shuntvoltage = 0;
+    float busvoltage = 0;
+    float current_mA = 0;
+    float loadvoltage = 0;
+    float power_mW = 0;
+    shuntvoltage = ina219.getShuntVoltage_mV();
+    busvoltage = ina219.getBusVoltage_V();
+    current_mA = ina219.getCurrent_mA();
+    power_mW = ina219.getPower_mW();
+    loadvoltage = busvoltage + (shuntvoltage / 1000);
+    Serial.println("IOS: Measuring voltage and current with INA219 ...");
+    Serial.print(" Bus Voltage:   "); Serial.print(busvoltage); Serial.println(" V");
+    Serial.print(" Shunt Voltage: "); Serial.print(shuntvoltage); Serial.println(" mV");
+    Serial.print(" Load Voltage:  "); Serial.print(loadvoltage); Serial.println(" V");
+    Serial.print(" Current:       "); Serial.print(current_mA); Serial.println(" mA");
+    Serial.print(" Power:         "); Serial.print(power_mW); Serial.println(" mW");
+    Serial.println("");
+  }
 
   // Print Free AVR Memory
   Serial.print("IOS: Total memory on ATmega1284P: ");
@@ -1029,9 +1080,6 @@ void setup()
   Serial.println(" Determine external Eeprom size");
   start = micros();
   int size = ee.determineSize();
-  diff = micros() - start;
-  Serial.print(" Time: ");
-  Serial.println(diff);
   if (size > 0)
   {
     Serial.print(" Size: ");
@@ -1044,7 +1092,7 @@ void setup()
   else
   {
     Serial.println("ERROR: Can't find eeprom - stopped...");
-    while (1);
+    //while (1);
   }
   // Print the ALL_CAPS option
   Serial.print(F("IOS: ALL CAPS is "));
@@ -1071,22 +1119,29 @@ void setup()
   {
     Serial.println("OFF");
   }
-  // Print Basic from ROM or SD
-  Serial.print (F("IOS: Basic loading from "));
-  if (BasicRom) Serial.println("ROM.");
-  else Serial.println("SD.");
 
   // ----------------------------------------
   // BOOT SELECTION AND SYS PARAMETERS MENU
   // ----------------------------------------
 
   // Boot selection and system parameters menu if requested
-  mountSD(&filesysSD); mountSD(&filesysSD);       // Try to muont the SD volume
+  mountSD(&filesysSD); mountSD(&filesysSD);       // Try to mount the SD volume
   bootMode = EEPROM.read(bootModeAddr);           // Read the previous stored boot mode
+
+  if ((bootMode == 0 ) || (bootMode == 5))
+  {
+    Serial.print (F("IOS: Basic loading from "));   // Print Basic from ROM or SD
+    if (bootMode == 5) Serial.println("ROM.");
+    else Serial.println("SD.");
+  }
+
+
   if ((bootSelection == 1 ) || (bootMode > maxBootMode))
     // Enter in the boot selection menu if USER key was pressed at startup
     //   or an invalid bootMode code was read from internal EEPROM
+
   {
+
     if (lcdPresent) {
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -1103,6 +1158,8 @@ void setup()
     Serial.println();
     Serial.println(F("IOS: Select boot mode or system parameters:"));
     Serial.println();
+
+
 
     // Previous valid boot mode read, so enable '0' selection
     if (bootMode <= maxBootMode)
@@ -1156,61 +1213,6 @@ void setup()
     Serial.print("Your Choice = ");
     Serial.print(inChar);
     Serial.println("  Ok");
-
-    if (lcdPresent) {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("IOS: ");
-      lcd.setCursor(0, 2);
-      lcd.print("Boot Menu Choice");
-      lcd.setCursor(0, 3);
-
-      switch (inChar)
-      {
-        case '0':
-          lcd.print("0: No change");  // No Change
-          delay(1000);
-          break;
-
-        case '1':
-          lcd.print("1: Basic");  // Load Basic
-          delay(1000);
-          break;
-
-        case '2':
-          lcd.print("2: Forth");  //  Load Forth
-          delay(1000);
-          break;
-
-        case '3':
-          lcd.print("3: Load OS from Disk");  //  Load OS
-          delay(1000);
-          break;
-
-        case '4':
-          lcd.print("4: Autoboot");  //  Load Autoboot
-          delay(1000);
-          break;
-
-        case '5':
-          lcd.print("iLoad Waiting");  // iLoad Programme from Serial Port
-          delay(1000);
-          break;
-
-        case 'B':
-        case 'b':
-          lcd.print("Basic from ROM");  // Basic from Arduino
-          delay(1000);
-          break;
-
-        default:
-          lcd.print(inChar);  // Menu value from Monitor
-          delay(1000);
-          break;
-
-      }
-    }
-
 
     // Make the selected action for the system paramters choice
     switch (inChar)
@@ -1280,20 +1282,67 @@ void setup()
     bootMode = inChar - '1';                      // Calculate bootMode from inChar
     if ((inChar == 'B') || (inChar == 'b')) bootMode = 5;
 
+    Serial.print("Boot Mode is now set to = ");
+    Serial.println(bootMode);
+
     if (bootMode <= maxBootMode) EEPROM.update(bootModeAddr, bootMode); // Save to the internal EEPROM if required
     else bootMode = EEPROM.read(bootModeAddr);    // Reload boot mode if '0' or > '5' choice selected
 
-    if (debug)
-    {
-      Serial.print("Boot Mode is now set to = ");
-      Serial.println(bootMode);
-    }
+  }
 
-    if (lcdPresent) {
-      lcd.setCursor(0, 1);
-      lcd.print("                ");
+  if (lcdPresent) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("IOS: Z80 CPU active!");
+    lcd.setCursor(0, 2);
+    if (bootSelection == 1) lcd.print("Boot Menu Choice");
+    else
+      lcd.print("Rebooted with");
+
+    lcd.setCursor(0, 3);
+
+    bootMode = EEPROM.read(bootModeAddr);
+
+    switch (bootMode)
+    {
+      case 0:
+        lcd.print("No Change");
+        delay(1000);
+        break;
+
+      case 1:
+        lcd.print("SD Basic Running");
+        delay(1000);
+        break;
+
+      case 2:
+        lcd.print("Forth");
+        delay(1000);
+        break;
+
+      case 3:
+        lcd.print("Load OS from Disk");
+        delay(1000);
+        break;
+
+      case 4:
+        lcd.print("iLoad Waiting");  // iLoad Programme from Serial Port
+        delay(1000);
+        break;
+
+      case 5:
+        lcd.print("ROM Basic Running");
+        delay(1000);
+        break;
+
+      default:
+        lcd.print("BootMode Value = ");
+        lcd.print(bootMode);
+        delay(1000);
+        break;
     }
   }
+
 
   // Print current Disk Set and OS name (if OS boot is enabled)
   if (bootMode == 2)
@@ -1380,10 +1429,11 @@ void setup()
     if (debug)
     {
       if (lcdPresent) {
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Debug Mode On");
+        //lcd.clear();
+        lcd.setCursor(10, 1);
+        lcd.print("Debug Mode");
       }
+
       Serial.print("DEBUG: Injected JP 0x");
       Serial.println(BootStrAddr, HEX);
     }
@@ -1401,6 +1451,17 @@ void setup()
     Serial.println(inChar);
     Serial.print("DEBUG: Boot Mode = ");
     Serial.println(bootMode);
+    Serial.print("DEBUG: Flash Selected = ");
+
+    switch (bootMode)
+    {
+      case 4:
+        Serial.println("Boot Image A");
+        break;
+      case 5:
+        Serial.println("Boot Image B");
+        break;
+    }
     Serial.print("DEBUG: Flash BootImageSize = ");
     Serial.println(BootImageSize);
     Serial.print("DEBUG: BootStrAddr = ");
@@ -1410,8 +1471,9 @@ void setup()
   //
 
   // Load from SD
-  if (bootMode < maxBootMode)
+  if (bootMode < maxBootMode - 1)
   {
+
     // Mount a volume on SD
     if (mountSD(&filesysSD))
     {
@@ -1456,7 +1518,7 @@ void setup()
     Serial.print(")...");
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("IOS: Loading boot");
+    lcd.print("IOS: Loading file");
     lcd.setCursor(0, 2);
     lcd.print(fileNameSD);
 
@@ -1485,6 +1547,7 @@ void setup()
   }
   else
   {
+
     // Load from flash
     Serial.print("IOS: Loading boot program...");
     // Write boot program into external RAM
@@ -1496,29 +1559,7 @@ void setup()
 
   Serial.println(" Done");
 
-  if (lcdPresent) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("IOS: Z80 CPU active!");
-    lcd.setCursor(0, 2);
-    lcd.print("Boot Menu Choice");
-    lcd.setCursor(0, 3);
 
-    switch (bootMode)
-    {
-      case '4':
-        lcd.print("iLoad Waiting");  // iLoad Programme from Serial Port
-        delay(1000);
-        break;
-
-      case '5':
-        lcd.print("Basic Running");
-        delay(1000);
-        break;
-
-    }
-
-  }
   // ----------------------------------------
   // Z80 BOOT - Registers as per Atmel1284(p)
   // ----------------------------------------
@@ -1538,10 +1579,7 @@ void setup()
   Serial.println("IOS: Zilog Z80 is running from now!");
   Serial.println();
 
-  if (lcdPresent) {
-    lcd.setCursor(0, 2);
-    lcd.print("IOS: Z80 CPU active!");
-  }
+
   // Flush serial Rx buffer
   while (Serial.available() > 0)
   {
@@ -1599,6 +1637,16 @@ void loop()
         // Opcode 0x0B  SELSECT         1
         // Opcode 0x0C  WRITESECT       512
         // Opcode 0x0D  SETBANK         1
+
+        // *******  LCD OPCODES  *******
+
+        // Opcode 0x0E  LCDWrite        1
+        // Opcode 0x0F  LCDClear        1
+        // Opcode 0x10  LCDCursor       2
+        // Opcode 0x11  LCDBacklight    1
+        // Opcode 0x12  LCDScroll       1
+
+
         // Opcode 0xFF  No operation    1
         //
         //
@@ -1644,14 +1692,14 @@ void loop()
             if (ioData & B00000001) {
               digitalWrite(USER, LOW);
               if (lcdPresent) {
-                lcd.setCursor(12, 3);
-                lcd.print("ULED");
+                //lcd.setCursor(14, 3);
+                //lcd.print("ULED");
               }
             }
             else {
               digitalWrite(USER, HIGH);
               if (lcdPresent) {
-                lcd.setCursor(12, 3);
+                lcd.setCursor(14, 3);
                 lcd.print("    ");
               }
             }
@@ -1739,13 +1787,83 @@ void loop()
               Wire.endTransmission();
             }
             break;
+
+          // LCD Write :
+
           case  0x0E:
             // Write something to the LCD:
             if (lcdPresent) {
-              lcd.setCursor(0, 3);
               lcd.print((char)ioData);
             }
             break;
+
+          // LCD Clear Screen :
+
+          case  0x0F:
+            // Clear the LCD set curor to 0,0:
+            //Serial.print("reached here with opcode = ");
+            //Serial.println(ioOpcode);
+
+            if (lcdPresent) {
+              lcd.clear();
+            }
+            break;
+
+          // LCD Set Row&Column :
+
+
+          case  0x10:
+            // LCD set curor to X,Y:
+
+            int ColumnSel;
+            int RowSel;
+
+            // LSB
+            ColumnSel = ioData & 0x0F;  // Take just the Lowest 4 bits.;
+
+            // MSB
+            RowSel = (ioData & 0xFF) >> 4;  // Take just the Highest 4 bits.;
+
+            if ((RowSel < 4) && (ColumnSel < 20))
+            {
+              // Row and Coulmn numbers valid
+              if (lcdPresent)  lcd.setCursor(ColumnSel, RowSel);
+            }
+
+            break;
+
+          case  0x11:
+            // Change the LCD BackLight
+
+            if (debug)
+            {
+              Serial.print("Change the LCD BackLight with ioData = ");
+              Serial.println((char)ioData);
+            }
+            if (lcdPresent) {
+              if (ioData == 1)lcd.backlight();
+              else
+                lcd.noBacklight();
+            }
+            break;
+
+          case  0x12:
+            // Change the LCD Scroll
+
+            if (debug)
+            {
+              Serial.print("Change the LCD Scroll with ioData = ");
+              Serial.println((char)ioData);
+            }
+
+            if (lcdPresent) {
+              if (ioData == 1)lcd.autoscroll();
+              else
+                lcd.noAutoscroll();
+            }
+            break;
+
+
           // GPPUB Write (GPIO Exp. Mod. ):
           //
           //                I/O DATA:    D7 D6 D5 D4 D3 D2 D1 D0
